@@ -18,6 +18,10 @@ ValidChannels = ("auction", "auction-bot-sandbox")
 #set to True for debugging
 ShortenHoursToMinutes = False
 
+#corp spreadsheet exported as CSV
+OfferingsCsvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTU0PDYV0CYk5LObZAFcxIXZNshT27WHvy1CZNmm8paC7eMVmTlCk3rxIFyEY6Tbiz0uiIDG8CxGuCm/pub?gid=0&single=true&output=csv"
+CachedSellersData = {}
+
 FioInventoryUrl = "https://rest.fnar.net/csv/inventory?group={group}&apikey={apikey}"
 FioInventoryShipyardGroup = "41707164"
 FioInventoryEv1lGroup = "83373923"
@@ -479,7 +483,7 @@ async def findInInventories(ctx, ticker):
     inventories = CachedShipyardInventories if isShipPartTicker else CachedEv1lInventories
   else:
     csvData = csv.DictReader(response.text.split("\r\n"))
-    
+
     for row in csvData:
       if row["Username"] not in inventories:
         inventories[row["Username"]] = {}
@@ -497,8 +501,23 @@ async def findInInventories(ctx, ticker):
   return sorted(result, key=lambda x: x[1])[::-1]
 
 
+def getSellers(ticker):
+  global CachedSellersData
+  result = []
+  response = requests.get(OfferingsCsvUrl)
+  if response.status_code == 200:
+    CachedSellersData = csv.DictReader(response.text.split("\r\n"))
+  if CachedSellersData:
+    result = [
+        row["Seller"].upper() for row in CachedSellersData
+        if row["MAT"] == ticker
+    ]
+  return result
+
+
 @bot.command()
-async def whohas(ctx, ticker):
+async def whohas(ctx, ticker, all=""):
+  shouldReturnAll = all == "all"
   if ctx.author == bot.user or ctx.author.bot:
     return
   if ctx.channel.name not in ValidChannels:
@@ -509,6 +528,11 @@ async def whohas(ctx, ticker):
   Log.info("whohas", ticker)
   result = await findInInventories(ctx, ticker.upper())
   #print(str(result))
+  print("Full:", str(result))
+  if not shouldReturnAll:
+    sellers = getSellers(ticker.upper())
+    print("Sellers:", str(sellers))
+    result = [(u, a) for (u, a) in result if u in sellers]
   if len(result) == 0:
     await ctx.reply(
         "As far as I know, nobody has {ticker}".format(ticker=ticker))
@@ -519,6 +543,7 @@ async def whohas(ctx, ticker):
                                             ticker=ticker.upper())
       for (u, a) in result
   ]
+  print("Filtered:", str(formattedResult))
   await ctx.reply("\n".join(formattedResult))
 
 
