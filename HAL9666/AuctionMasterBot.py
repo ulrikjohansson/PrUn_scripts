@@ -519,7 +519,7 @@ def getSellers(ticker):
 
 @bot.command()
 async def whohas(ctx, ticker, all=""):
-  shouldReturnAll = all == "all"
+  shouldReturnAll = all.lower() == "all"
   if ctx.author == bot.user or ctx.author.bot:
     return
   if ctx.channel.name not in ValidChannels:
