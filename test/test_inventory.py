@@ -68,24 +68,33 @@ async def test_inventory():
 
 @pytest.mark.asyncio
 async def test_pos_filter():
-
-    # when someone has set POS filter, we should only count the amounts from those locations
-    bot.getSellerData = MagicMock(return_value = {"Kindling":["UV-351a"], "Felmer": ["XG-521b"], "Gilith": []})
-
-    csv_file = create_csv(
-        [
-            {"Username":"Kindling", "Ticker": "C", "Amount":"200", "NaturalId": "UV-351a"},
-            {"Username":"Kindling", "Ticker": "C", "Amount":"100", "NaturalId": "KW-688c"},
-            {"Username":"Gilith", "Ticker": "C", "Amount":"100", "NaturalId": "UV-351a"},
-            {"Username":"Felmer", "Ticker": "C", "Amount":"250", "NaturalId": "UV-351a"}
-        ]
-    )
-    
-    fio_response = MagicMock()
-    fio_response.status_code = 200
-    fio_response.text = csv_file
-
-    bot.requests.get = MagicMock(return_value=fio_response)
+    inventory = bot.GroupInventory(groupId=1234)
+    inventory.updateInventory = MagicMock()
+    inventory.fioData = {
+        "Kindling": {
+            "C": [
+                ("UV-351a", 200),
+                ("KW-688c", 100)
+            ]
+        },
+        "Gilith": {
+            "C": [("UV-351a", 100)]
+        },
+        "Felmer": {
+            "C": [("UV-351a", 250)]
+        },
+        "Thoern": {
+            "H": [("UV-351a", 1000)],
+            "C": [("UV-351a", 100)]
+        }
+    }
+    inventory.sellerData = {
+        "Kindling": ("C", ["UV-351a"]),
+        "Gilith": ("C", []),
+        "Felmer": ("C", ["XG-521b"]),
+        "Thoern": ("H", ["UV-351a"])
+    }
+    bot.Ev1lInventory = inventory
 
     inv = await bot.whohas(MagicMock(), "C", False)
 
@@ -93,14 +102,32 @@ async def test_pos_filter():
     assert inv[0] == ("Kindling", 200)
     assert inv[1] == ("Gilith", 100)
 
-
-# TODO: test shouldReturnAll = False
-
 def test_getSellersData():
     csv_data = [
             {"MAT":"C", "Seller": "Kindling", "POS":"KW-688c", "Price/u": "300"},
             {"MAT":"C", "Seller": "Felmer", "POS":"", "Price/u": "300"},
             {"MAT":"WCB", "Seller": "Felmer", "POS":"UV-351a", "Price/u": "300000"}
+        ]
+    sheets_csv_file = create_csv(csv_data)
+
+    fake_fio_response = MagicMock()
+    fake_fio_response.status_code = 200
+    fake_fio_response.text = sheets_csv_file
+    bot.requests.get = MagicMock(return_value = fake_fio_response)
+
+    sellers = bot.getSellerData("C")
+
+    assert isinstance(sellers, dict)
+    assert len(sellers) == 2
+
+    sellers = bot.getSellerData("WCB")
+    assert len(sellers) == 1
+
+def test_getSellersData_no_POS_column():
+    csv_data = [
+            {"MAT":"C", "Seller": "Kindling", "Price/u": "300"},
+            {"MAT":"C", "Seller": "Felmer", "Price/u": "300"},
+            {"MAT":"WCB", "Seller": "Felmer", "Price/u": "300000"}
         ]
     sheets_csv_file = create_csv(csv_data)
 

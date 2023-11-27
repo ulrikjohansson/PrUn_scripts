@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional, TypeAlias
 import discord
 from discord.ext import commands
 
@@ -11,25 +11,105 @@ from datetime import timedelta
 import logging
 import os
 import requests
+import time
 
 import traceback
 
-#from keep_alive_flask import keep_alive
+Location: TypeAlias = str
+Username: TypeAlias = str
+Ticker: TypeAlias = str
+Amount: TypeAlias = int
+FioData: TypeAlias = dict[Username, dict[Ticker,list[tuple[Location,Amount]]]]
+SellerData: TypeAlias = dict[Username,tuple[Ticker,list[Location]]]
+
+class GroupInventory:
+
+  _fioInventoryUrl = "https://rest.fnar.net/csv/inventory?group={group}&apikey={apikey}"
+  _offeringsSheetCsvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTU0PDYV0CYk5LObZAFcxIXZNshT27WHvy1CZNmm8paC7eMVmTlCk3rxIFyEY6Tbiz0uiIDG8CxGuCm/pub?gid=0&single=true&output=csv"
+
+  groupId: int
+  groupName: Optional[str]
+  fioData: FioData
+  fioDataLastUpdated: float = 0
+  sellerData: SellerData
+
+  def __init__(self, groupId: int, groupName: Optional[str] = None) -> None:
+    self.groupId = groupId
+    self.groupName = groupName
+    self.fioData = {}
+    self.sellerData = {}
+
+  def updateInventory(self):
+    #update fio data from FIO csv endpoint
+    fioUrl = self._fioInventoryUrl.format(
+      apikey=os.getenv("FIO_API_KEY"),
+      group=self.groupId)
+    response = requests.get(fioUrl)
+    if response.status_code == 200:
+      self.fioDataLastUpdated = time.time()
+      csvData = csv.DictReader(response.text.split("\r\n"))
+
+      if self.fioData:
+        self.fioData.clear()
+
+      for row in csvData:
+        if row["Username"] not in self.fioData:
+          self.fioData[row["Username"]] = {}
+        if row["Ticker"] not in self.fioData[row["Username"]]:
+          self.fioData[row["Username"]][row["Ticker"]] = []
+        self.fioData[row["Username"]][row["Ticker"]].append((row["NaturalId"], int(row["Amount"])))
+
+    #update sellerData from Offers sheet
+    result = {}
+    response = requests.get(self._offeringsSheetCsvUrl)
+    if response.status_code == 200:
+      sellerData = list(csv.DictReader(response.text.split("\r\n")))
+      if sellerData:
+        result: SellerData = {}
+        for row in sellerData:
+          pos_list = [x for x in row.get("POS", "").split(',') if x != ""]
+          result[row['Seller'].upper()] = (row["MAT"], pos_list)
+
+    self.sellerData = result
+
+  def findInInventory(self, ticker: Ticker, shouldReturnAll: bool = False)->list[tuple[Username, Amount]]:
+    ticker_filtered_result: list[tuple[Username, list[tuple[Location,Amount]]]] = []
+    # filter for only ticker we want
+    for (user, inv) in self.fioData.items():
+      if ticker in inv:
+        ticker_filtered_result.append((user, inv[ticker]))
+
+    if not shouldReturnAll:
+      ticker_filtered_sellersData = { x:y for x,y in self.sellerData.items() if y[0] == ticker}
+      sellers = [s for s in ticker_filtered_sellersData.keys()]
+      print("Sellers:", str(sellers))
+      seller_filtered_result = [x for x in ticker_filtered_result if x[0] in sellers]
+
+      pos_filtered_result: list[tuple[str,list[tuple[str,int]]]] = []
+
+      for (user, inv_rows) in seller_filtered_result:
+        filtered_inv_rows = [x for x in inv_rows if x[0] in ticker_filtered_sellersData[user][1] or len(ticker_filtered_sellersData[user][1]) == 0]
+        if len(filtered_inv_rows) > 0:
+          pos_filtered_result.append((user, filtered_inv_rows))
+
+      ticker_filtered_result = pos_filtered_result
+        
+    summed_inventories: list[tuple[Username,Amount]] = []
+    # sum up amounts from all remaining locations
+    for (user, inv_rows) in ticker_filtered_result:
+      amount = sum([x[1] for x in inv_rows])
+      if amount > 0:
+        summed_inventories.append((user, amount))
+
+    return sorted(summed_inventories, key=lambda x: x[1])[::-1]
 
 ValidChannels = ("auction", "auction-bot-sandbox")
 #ValidChannels = ("auction-bot-sandbox")
 #set to True for debugging
 ShortenHoursToMinutes = False
 
-#corp spreadsheet exported as CSV
-OfferingsCsvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTU0PDYV0CYk5LObZAFcxIXZNshT27WHvy1CZNmm8paC7eMVmTlCk3rxIFyEY6Tbiz0uiIDG8CxGuCm/pub?gid=0&single=true&output=csv"
-CachedSellersData:  Iterable[dict[str, str]] = {}
-
-FioInventoryUrl = "https://rest.fnar.net/csv/inventory?group={group}&apikey={apikey}"
-FioInventoryShipyardGroup = "41707164"
-FioInventoryEv1lGroup = "83373923"
-CachedShipyardInventories: dict[str, dict[str, tuple[str,int]]] = {}
-CachedEv1lInventories: dict[str, dict[str, tuple[str,int]]] = {}
+ShipyardInventory: GroupInventory = GroupInventory(groupId=41707164, groupName="ShipyardGroup")
+Ev1lInventory: GroupInventory = GroupInventory(groupId=83373923, groupName="Ev1lGroup")
 ShipPartTickers = (
     "BR1",
     "BR2",  #bridges
@@ -468,92 +548,21 @@ async def help(ctx):
       "$bid [price]\nPlaces a new bid. Examples:\n$bid 4mil\nbid 4.25mil\n")
   await ctx.send("$status\nShows current auction status")
 
-async def updateInventory(groupId: str, inventory: dict[str, dict[str,list[tuple[str,int]]]]):
-  fioUrl = FioInventoryUrl.format(
-      apikey=os.getenv("FIO_API_KEY"),
-      group=groupId)
-  response = requests.get(fioUrl)
-  if response.status_code != 200:
-    raise Exception(f"Failed to update inventory for groupId {groupId}")
-
-  csvData = csv.DictReader(response.text.split("\r\n"))
-
-  inventory.clear()
-  for row in csvData:
-    if row["Username"] not in inventory:
-      inventory[row["Username"]] = {}
-    if row["Ticker"] not in inventory[row["Username"]]:
-      inventory[row["Username"]][row["Ticker"]] = []
-    inventory[row["Username"]][row["Ticker"]].append((row["NaturalId"], int(row["Amount"])))
-
-async def findInInventory(ticker: str, inventory: dict[str, dict[str,list[tuple[str,int]]]], shouldReturnAll: bool = False)->list[tuple[str, int]]:
-  result: list[tuple[str, list[tuple[str,int]]]] = []
-  # filter for only ticker we want
-  for (user, inv) in inventory.items():
-    if ticker in inv:
-      result.append((user, inv[ticker]))
-
-  if not shouldReturnAll:
-    sellersData = getSellerData(ticker)
-    sellers = [s for s in sellersData.keys()]
-    print("Sellers:", str(sellers))
-    seller_filtered_result = [x for x in result if x[0] in sellers]
-
-    pos_filtered_result: list[tuple[str,list[tuple[str,int]]]] = []
-
-    for (user, inv_rows) in seller_filtered_result:
-      filtered_inv_rows = [x for x in inv_rows if x[0] in sellersData[user] or len(sellersData[user]) == 0]
-      if len(filtered_inv_rows) > 0:
-        pos_filtered_result.append((user, filtered_inv_rows))
-
-    result = pos_filtered_result
-      
-  summed_inventories: list[tuple[str,int]] = []
-  # sum up amounts from all remaining locations
-  for (user, inv_rows) in result:
-    amount = sum([x[1] for x in inv_rows])
-    if amount > 0:
-      summed_inventories.append((user, amount))
-
-
-
-  return sorted(summed_inventories, key=lambda x: x[1])[::-1]
-
-
-def getSellerData(ticker: str) -> dict[str,list[str]]:
-  global CachedSellersData
-  result = {}
-  response = requests.get(OfferingsCsvUrl)
-  if response.status_code == 200:
-    CachedSellersData = list(csv.DictReader(response.text.split("\r\n")))
-  if CachedSellersData:
-    result: dict[str,list[str]] = {}
-    for row in CachedSellersData:
-      pos_list = [x for x in row.get("POS", "").split(',') if x != ""]
-      if row["MAT"] == ticker:
-        result[row['Seller'].upper()] = pos_list
-
-  return result
-
 async def whohas(ctx: Any, ticker: str, shouldReturnAll: bool = False) -> list[tuple[str, int]]:
-  
   Log.info("whohas", ticker)
 
   # update relevant group inventory
-  global CachedShipyardInventories
-  global CachedEv1lInventories
+  global ShipyardInventory
+  global Ev1lInventory
   isShipPartTicker = ticker in ShipPartTickers
 
-  group = FioInventoryShipyardGroup if isShipPartTicker else FioInventoryEv1lGroup
-  inventory = CachedShipyardInventories if isShipPartTicker else CachedEv1lInventories
+  inventory = ShipyardInventory if isShipPartTicker else Ev1lInventory
   try:
-    await updateInventory(groupId=group, inventory=inventory)
-  except Exception as e:
-    await ctx.reply(
-        "Error updating inventory from FIO. Falling back to cached data"
-    )
-  
-  result = await findInInventory(ticker, inventory, shouldReturnAll)
+    inventory.updateInventory()
+  except Exception:
+    pass
+
+  result = inventory.findInInventory(ticker, shouldReturnAll)
   #print(str(result))
   print("Full:", str(result))
 
